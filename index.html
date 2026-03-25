@@ -1,0 +1,987 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Commercial Lease Calculator</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useMemo, useCallback } = React;
+
+    // ─── Currency Config ───────────────────────────────────────────────
+    const CURRENCIES = {
+      AUD: { symbol: "A$", name: "Australian Dollar" },
+      USD: { symbol: "US$", name: "US Dollar" },
+      EUR: { symbol: "€", name: "Euro" },
+      GBP: { symbol: "£", name: "British Pound" },
+      NZD: { symbol: "NZ$", name: "New Zealand Dollar" },
+      PGK: { symbol: "K", name: "Papua New Guinea Kina" },
+    };
+
+    // ─── Utility Functions ─────────────────────────────────────────────
+    const fmt = (val, currency = "AUD", decimals = 2) => {
+      const sym = CURRENCIES[currency]?.symbol || "$";
+      const n = Number(val) || 0;
+      const neg = n < 0;
+      const abs = Math.abs(n);
+      const str = abs.toLocaleString("en-AU", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+      return neg ? `-${sym}${str}` : `${sym}${str}`;
+    };
+
+    const fmtNum = (val, decimals = 2) => {
+      const n = Number(val) || 0;
+      return n.toLocaleString("en-AU", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    };
+
+    const pct = (val) => `${(Number(val) || 0).toFixed(2)}%`;
+
+    const addMonths = (dateStr, months) => {
+      const d = new Date(dateStr + "T00:00:00");
+      d.setMonth(d.getMonth() + months);
+      return d;
+    };
+
+    const monthLabel = (dateStr, monthOffset) => {
+      const d = addMonths(dateStr, monthOffset);
+      return d.toLocaleDateString("en-AU", { year: "numeric", month: "short" });
+    };
+
+    const yearOfLease = (monthIndex) => Math.floor(monthIndex / 12);
+
+    let _id = 100;
+    const nextId = () => ++_id;
+
+    // ─── Escalation Logic ──────────────────────────────────────────────
+    const escalate = (base, year, type, rate, marketReviews = {}) => {
+      if (type === "market") {
+        let currentBase = base;
+        for (let y = 1; y <= year; y++) {
+          if (marketReviews[y] !== undefined && marketReviews[y] !== "") {
+            currentBase = Number(marketReviews[y]);
+          } else {
+            currentBase = currentBase * (1 + (rate || 0) / 100);
+          }
+        }
+        return currentBase;
+      }
+      // fixed or cpi — same math, CPI is just labelled differently
+      return base * Math.pow(1 + (rate || 0) / 100, year);
+    };
+
+    // ─── Default Lease Template ────────────────────────────────────────
+    const newLease = (name = "Lease 1") => ({
+      id: nextId(),
+      name,
+      area: 1000,
+      startDate: "2026-01-01",
+      termYears: 5,
+      termMonths: 0,
+      baseRentPerSqm: 450,
+      escalationType: "fixed",
+      escalationRate: 3.5,
+      cpiAssumption: 3.0,
+      marketReviews: {},
+      marketReviewInterval: 3,
+      outgoingsPerSqm: 120,
+      outgoingsEscRate: 3.5,
+      parking: [
+        { id: nextId(), name: "On Grade", spaces: 25, ratePerMonth: 250, levyPerMonth: 30 },
+        { id: nextId(), name: "Undercover Secure", spaces: 15, ratePerMonth: 450, levyPerMonth: 50 },
+      ],
+      signagePerAnnum: 0,
+      rentFreeMonths: 6,
+      abatementMonths: 0,
+      abatementPercent: 50,
+      capexContribution: 0,
+      fitoutContribution: 0,
+      trFee: 0,
+      earlyAccessMonths: 0,
+      makeGoodPerSqm: 75,
+      fmCostsPerSqm: 0,
+      desks: 100,
+      fte: 80,
+    });
+
+    const newDeal = (name = "Deal 1") => ({
+      id: nextId(),
+      name,
+      leases: [newLease("Lease 1")],
+    });
+
+    // ─── Cash Flow Engine ──────────────────────────────────────────────
+    const generateCashFlow = (lease) => {
+      const totalMonths = lease.termYears * 12 + lease.termMonths;
+      if (totalMonths <= 0) return [];
+
+      const rows = [];
+      const escRate = lease.escalationType === "cpi" ? lease.cpiAssumption : lease.escalationRate;
+
+      for (let m = 0; m < totalMonths; m++) {
+        const yr = yearOfLease(m);
+        const escalatedRent = escalate(lease.baseRentPerSqm, yr, lease.escalationType, escRate, lease.marketReviews);
+        const escalatedOuts = lease.outgoingsPerSqm * Math.pow(1 + (lease.outgoingsEscRate || 0) / 100, yr);
+        const escalatedSignage = (lease.signagePerAnnum || 0) * Math.pow(1 + (escRate || 0) / 100, yr);
+        const escalatedFM = (lease.fmCostsPerSqm || 0) * Math.pow(1 + (escRate || 0) / 100, yr);
+        const escalatedMakeGood = (lease.makeGoodPerSqm || 0) * Math.pow(1 + (escRate || 0) / 100, yr);
+
+        // Monthly rent
+        let monthlyRent = (escalatedRent * lease.area) / 12;
+        let isRentFree = false;
+        let isAbatement = false;
+
+        if (m < (lease.rentFreeMonths || 0)) {
+          monthlyRent = 0;
+          isRentFree = true;
+        } else if (m < (lease.rentFreeMonths || 0) + (lease.abatementMonths || 0)) {
+          monthlyRent = monthlyRent * (1 - (lease.abatementPercent || 0) / 100);
+          isAbatement = true;
+        }
+
+        // Monthly outgoings
+        const monthlyOuts = (escalatedOuts * lease.area) / 12;
+
+        // Monthly parking
+        let monthlyParking = 0;
+        let monthlyParkingLevy = 0;
+        (lease.parking || []).forEach((p) => {
+          monthlyParking += (p.spaces || 0) * (p.ratePerMonth || 0);
+          monthlyParkingLevy += (p.spaces || 0) * (p.levyPerMonth || 0);
+        });
+
+        // Monthly signage
+        const monthlySignage = escalatedSignage / 12;
+
+        // FM costs
+        const monthlyFM = (escalatedFM * lease.area) / 12;
+
+        // Make good provision (spread monthly)
+        const monthlyMakeGood = (escalatedMakeGood * lease.area) / totalMonths;
+
+        // Early access (shown as occupancy before lease, no rent)
+        const earlyAccessCost = 0; // tracked separately
+
+        // Capex / fitout / TR fee — one-time in month 0
+        const capex = m === 0 ? -(lease.capexContribution || 0) : 0;
+        const fitout = m === 0 ? -(lease.fitoutContribution || 0) : 0;
+        const trFee = m === 0 ? (lease.trFee || 0) : 0;
+
+        const totalMonthly = monthlyRent + monthlyOuts + monthlyParking + monthlyParkingLevy + monthlySignage + monthlyFM + monthlyMakeGood + capex + fitout + trFee;
+
+        rows.push({
+          month: m + 1,
+          date: monthLabel(lease.startDate, m),
+          year: yr + 1,
+          rent: monthlyRent,
+          outgoings: monthlyOuts,
+          parking: monthlyParking,
+          parkingLevy: monthlyParkingLevy,
+          signage: monthlySignage,
+          fm: monthlyFM,
+          makeGood: monthlyMakeGood,
+          capex,
+          fitout,
+          trFee,
+          total: totalMonthly,
+          isRentFree,
+          isAbatement,
+          escalatedRentPsqm: escalatedRent,
+        });
+      }
+      return rows;
+    };
+
+    // ─── NPV Calculation ───────────────────────────────────────────────
+    const calcNPV = (cashFlows, annualRate, field = "total") => {
+      const monthlyRate = annualRate / 100 / 12;
+      return cashFlows.reduce((sum, cf, i) => {
+        return sum + (cf[field] || 0) / Math.pow(1 + monthlyRate, i + 1);
+      }, 0);
+    };
+
+    // ─── Summary Calculations ──────────────────────────────────────────
+    const calcLeaseSummary = (lease, cashFlows) => {
+      const totalMonths = lease.termYears * 12 + lease.termMonths;
+      const totalRent = cashFlows.reduce((s, r) => s + r.rent, 0);
+      const totalOuts = cashFlows.reduce((s, r) => s + r.outgoings, 0);
+      const totalParking = cashFlows.reduce((s, r) => s + r.parking + r.parkingLevy, 0);
+      const totalSignage = cashFlows.reduce((s, r) => s + r.signage, 0);
+      const totalFM = cashFlows.reduce((s, r) => s + r.fm, 0);
+      const totalMakeGood = cashFlows.reduce((s, r) => s + r.makeGood, 0);
+      const totalIncentives = (lease.capexContribution || 0) + (lease.fitoutContribution || 0);
+      const totalCost = cashFlows.reduce((s, r) => s + r.total, 0);
+      const totalTR = lease.trFee || 0;
+
+      const annualCost = totalCost / (totalMonths / 12);
+      const grossEffectiveRent = totalMonths > 0 ? (totalRent - totalIncentives) / (lease.area * (totalMonths / 12)) : 0;
+      const netEffectiveRent = totalMonths > 0 ? totalRent / (lease.area * (totalMonths / 12)) : 0;
+      const costPerDesk = lease.desks > 0 ? annualCost / lease.desks : 0;
+      const costPerFTE = lease.fte > 0 ? annualCost / lease.fte : 0;
+
+      // Blended parking
+      const totalSpaces = (lease.parking || []).reduce((s, p) => s + (p.spaces || 0), 0);
+      const totalMonthlyParking = (lease.parking || []).reduce((s, p) => s + (p.spaces || 0) * ((p.ratePerMonth || 0) + (p.levyPerMonth || 0)), 0);
+      const blendedParkingRate = totalSpaces > 0 ? totalMonthlyParking / totalSpaces : 0;
+
+      return {
+        totalMonths, totalRent, totalOuts, totalParking, totalSignage, totalFM, totalMakeGood,
+        totalIncentives, totalCost, totalTR, annualCost, grossEffectiveRent, netEffectiveRent,
+        costPerDesk, costPerFTE, blendedParkingRate, totalSpaces,
+      };
+    };
+
+    // ─── Remaining Liability ───────────────────────────────────────────
+    const calcRemainingLiability = (lease, cashFlows, fromMonth) => {
+      const remaining = cashFlows.filter((cf) => cf.month >= fromMonth);
+      const totalMonths = lease.termYears * 12 + lease.termMonths;
+      const remainingMonths = totalMonths - fromMonth + 1;
+
+      const rentRemaining = remaining.reduce((s, r) => s + r.rent, 0);
+      const outsRemaining = remaining.reduce((s, r) => s + r.outgoings, 0);
+      const parkingRemaining = remaining.reduce((s, r) => s + r.parking + r.parkingLevy, 0);
+      const signageRemaining = remaining.reduce((s, r) => s + r.signage, 0);
+      const totalRemaining = remaining.reduce((s, r) => s + r.total, 0);
+
+      // Incentive clawback (pro-rata)
+      const totalIncentives = (lease.capexContribution || 0) + (lease.fitoutContribution || 0);
+      const clawbackRatio = totalMonths > 0 ? remainingMonths / totalMonths : 0;
+      const incentiveClawback = totalIncentives * clawbackRatio;
+
+      // Make good at end of term
+      const escRate = lease.escalationType === "cpi" ? lease.cpiAssumption : lease.escalationRate;
+      const termYears = totalMonths / 12;
+      const makeGoodTotal = (lease.makeGoodPerSqm || 0) * Math.pow(1 + (escRate || 0) / 100, termYears) * lease.area;
+
+      return {
+        rentRemaining, outsRemaining, parkingRemaining, signageRemaining, totalRemaining,
+        incentiveClawback, makeGoodTotal, remainingMonths,
+        grandTotal: totalRemaining + incentiveClawback + makeGoodTotal,
+      };
+    };
+
+    // ─── UI Components ─────────────────────────────────────────────────
+
+    // Input field component
+    const Field = ({ label, value, onChange, type = "number", step, min, className = "", suffix, prefix, wide, options }) => (
+      <div className={`flex flex-col gap-1 ${wide ? "col-span-2" : ""} ${className}`}>
+        <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">{label}</label>
+        {options ? (
+          <select value={value} onChange={(e) => onChange(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+            {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        ) : (
+          <div className="flex items-center gap-1">
+            {prefix && <span className="text-xs text-gray-400">{prefix}</span>}
+            <input type={type} value={value} step={step} min={min}
+              onChange={(e) => onChange(type === "number" ? e.target.value : e.target.value)}
+              className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none" />
+            {suffix && <span className="text-xs text-gray-400 whitespace-nowrap">{suffix}</span>}
+          </div>
+        )}
+      </div>
+    );
+
+    // Section card
+    const Section = ({ title, children, className = "" }) => (
+      <div className={`bg-white rounded-xl border border-gray-200 p-5 ${className}`}>
+        {title && <h3 className="text-sm font-semibold text-gray-700 mb-4 uppercase tracking-wide">{title}</h3>}
+        {children}
+      </div>
+    );
+
+    // Tab button
+    const Tab = ({ active, onClick, children }) => (
+      <button onClick={onClick}
+        className={`px-4 py-2 text-sm font-medium rounded-lg transition-all ${active ? "bg-blue-600 text-white shadow-sm" : "text-gray-600 hover:bg-gray-100"}`}>
+        {children}
+      </button>
+    );
+
+    // ─── Lease Input Panel ─────────────────────────────────────────────
+    const LeaseInputPanel = ({ lease, onChange, currency }) => {
+      const sym = CURRENCIES[currency]?.symbol || "$";
+
+      const update = (field, val) => {
+        const numFields = ["area", "termYears", "termMonths", "baseRentPerSqm", "escalationRate", "cpiAssumption",
+          "outgoingsPerSqm", "outgoingsEscRate", "signagePerAnnum", "rentFreeMonths", "abatementMonths",
+          "abatementPercent", "capexContribution", "fitoutContribution", "trFee", "earlyAccessMonths",
+          "makeGoodPerSqm", "fmCostsPerSqm", "desks", "fte", "marketReviewInterval"];
+        if (numFields.includes(field)) {
+          onChange({ ...lease, [field]: val === "" ? "" : Number(val) });
+        } else {
+          onChange({ ...lease, [field]: val });
+        }
+      };
+
+      const updateParking = (idx, field, val) => {
+        const p = [...lease.parking];
+        p[idx] = { ...p[idx], [field]: field === "name" ? val : (val === "" ? "" : Number(val)) };
+        onChange({ ...lease, parking: p });
+      };
+
+      const addParking = () => {
+        onChange({ ...lease, parking: [...lease.parking, { id: nextId(), name: `Type ${lease.parking.length + 1}`, spaces: 0, ratePerMonth: 0, levyPerMonth: 0 }] });
+      };
+
+      const removeParking = (idx) => {
+        onChange({ ...lease, parking: lease.parking.filter((_, i) => i !== idx) });
+      };
+
+      const updateMarketReview = (year, val) => {
+        onChange({ ...lease, marketReviews: { ...lease.marketReviews, [year]: val } });
+      };
+
+      const totalTermMonths = (lease.termYears || 0) * 12 + (lease.termMonths || 0);
+      const totalTermYears = totalTermMonths / 12;
+      const reviewYears = [];
+      if (lease.escalationType === "market" && lease.marketReviewInterval > 0) {
+        for (let y = lease.marketReviewInterval; y < totalTermYears; y += lease.marketReviewInterval) {
+          reviewYears.push(y);
+        }
+      }
+
+      return (
+        <div className="space-y-5">
+          <Section title="Lease Details">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <Field label="Lease Name" value={lease.name} type="text" onChange={(v) => update("name", v)} />
+              <Field label="Net Lettable Area" value={lease.area} onChange={(v) => update("area", v)} suffix="sqm" />
+              <Field label="Start Date" value={lease.startDate} type="text" onChange={(v) => update("startDate", v)} />
+              <Field label="Desks / Workpoints" value={lease.desks} onChange={(v) => update("desks", v)} />
+              <Field label="Term – Years" value={lease.termYears} onChange={(v) => update("termYears", v)} min={0} />
+              <Field label="Term – Months" value={lease.termMonths} onChange={(v) => update("termMonths", v)} min={0} step={1} />
+              <Field label="FTE" value={lease.fte} onChange={(v) => update("fte", v)} />
+              <div className="flex flex-col justify-end">
+                <span className="text-xs text-gray-400">Total Term</span>
+                <span className="text-sm font-medium text-gray-700 py-2">
+                  {lease.termYears || 0}y {lease.termMonths || 0}m ({totalTermMonths} months)
+                </span>
+              </div>
+            </div>
+          </Section>
+
+          <Section title="Rent & Escalation">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <Field label={`Base Rent`} value={lease.baseRentPerSqm} onChange={(v) => update("baseRentPerSqm", v)} prefix={sym} suffix="/sqm p.a." />
+              <Field label="Escalation Type" value={lease.escalationType} onChange={(v) => update("escalationType", v)}
+                options={[{ value: "fixed", label: "Fixed %" }, { value: "cpi", label: "CPI" }, { value: "market", label: "Market Review" }]} />
+              {lease.escalationType === "cpi" ? (
+                <Field label="CPI Assumption" value={lease.cpiAssumption} onChange={(v) => update("cpiAssumption", v)} suffix="% p.a." step={0.1} />
+              ) : (
+                <Field label="Escalation Rate" value={lease.escalationRate} onChange={(v) => update("escalationRate", v)} suffix="% p.a." step={0.1} />
+              )}
+              {lease.escalationType === "market" && (
+                <Field label="Review Every" value={lease.marketReviewInterval} onChange={(v) => update("marketReviewInterval", v)} suffix="years" />
+              )}
+            </div>
+            {lease.escalationType === "market" && reviewYears.length > 0 && (
+              <div className="mt-4 p-3 bg-gray-50 rounded-lg">
+                <p className="text-xs text-gray-500 mb-2">Market Review Rents (leave blank to use escalated rate):</p>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {reviewYears.map((y) => (
+                    <Field key={y} label={`Year ${y} Review`} value={lease.marketReviews[y] || ""} onChange={(v) => updateMarketReview(y, v)} prefix={sym} suffix="/sqm" />
+                  ))}
+                </div>
+              </div>
+            )}
+          </Section>
+
+          <Section title="Outgoings & Additional Costs">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <Field label="Outgoings" value={lease.outgoingsPerSqm} onChange={(v) => update("outgoingsPerSqm", v)} prefix={sym} suffix="/sqm p.a." />
+              <Field label="Outgoings Escalation" value={lease.outgoingsEscRate} onChange={(v) => update("outgoingsEscRate", v)} suffix="% p.a." step={0.1} />
+              <Field label="Signage" value={lease.signagePerAnnum} onChange={(v) => update("signagePerAnnum", v)} prefix={sym} suffix="p.a." />
+              <Field label="FM Costs (internal)" value={lease.fmCostsPerSqm} onChange={(v) => update("fmCostsPerSqm", v)} prefix={sym} suffix="/sqm p.a." />
+              <Field label="Make Good Provision" value={lease.makeGoodPerSqm} onChange={(v) => update("makeGoodPerSqm", v)} prefix={sym} suffix="/sqm" />
+            </div>
+          </Section>
+
+          <Section title="Parking">
+            <div className="space-y-3">
+              {lease.parking.map((p, idx) => (
+                <div key={p.id} className="grid grid-cols-2 md:grid-cols-6 gap-3 items-end p-3 bg-gray-50 rounded-lg">
+                  <Field label="Type" value={p.name} type="text" onChange={(v) => updateParking(idx, "name", v)} />
+                  <Field label="Spaces" value={p.spaces} onChange={(v) => updateParking(idx, "spaces", v)} />
+                  <Field label="Rate /space /month" value={p.ratePerMonth} onChange={(v) => updateParking(idx, "ratePerMonth", v)} prefix={sym} />
+                  <Field label="Levy /space /month" value={p.levyPerMonth} onChange={(v) => updateParking(idx, "levyPerMonth", v)} prefix={sym} />
+                  <div className="flex flex-col gap-1">
+                    <span className="text-xs text-gray-400">Monthly Total</span>
+                    <span className="text-sm font-medium py-2">{fmt((p.spaces || 0) * ((p.ratePerMonth || 0) + (p.levyPerMonth || 0)), currency)}</span>
+                  </div>
+                  <button onClick={() => removeParking(idx)} className="text-red-400 hover:text-red-600 text-xs py-2">Remove</button>
+                </div>
+              ))}
+              <button onClick={addParking} className="text-sm text-blue-600 hover:text-blue-800 font-medium">+ Add Parking Type</button>
+              {(() => {
+                const totalSpaces = lease.parking.reduce((s, p) => s + (p.spaces || 0), 0);
+                const totalCost = lease.parking.reduce((s, p) => s + (p.spaces || 0) * ((p.ratePerMonth || 0) + (p.levyPerMonth || 0)), 0);
+                const blended = totalSpaces > 0 ? totalCost / totalSpaces : 0;
+                return (
+                  <div className="flex gap-6 mt-3 p-3 bg-blue-50 rounded-lg text-sm">
+                    <span><strong>Total Spaces:</strong> {totalSpaces}</span>
+                    <span><strong>Total Monthly:</strong> {fmt(totalCost, currency)}</span>
+                    <span><strong>Blended Rate:</strong> {fmt(blended, currency)}/space/month</span>
+                  </div>
+                );
+              })()}
+            </div>
+          </Section>
+
+          <Section title="Incentives">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <Field label="Rent Free" value={lease.rentFreeMonths} onChange={(v) => update("rentFreeMonths", v)} suffix="months" />
+              <Field label="Abatement Period" value={lease.abatementMonths} onChange={(v) => update("abatementMonths", v)} suffix="months" />
+              <Field label="Abatement %" value={lease.abatementPercent} onChange={(v) => update("abatementPercent", v)} suffix="%" />
+              <Field label="Early Access" value={lease.earlyAccessMonths} onChange={(v) => update("earlyAccessMonths", v)} suffix="months" />
+              <Field label="Capex Contribution" value={lease.capexContribution} onChange={(v) => update("capexContribution", v)} prefix={sym} />
+              <Field label="Fitout Contribution" value={lease.fitoutContribution} onChange={(v) => update("fitoutContribution", v)} prefix={sym} />
+              <Field label="TR Fee" value={lease.trFee} onChange={(v) => update("trFee", v)} prefix={sym} />
+            </div>
+          </Section>
+        </div>
+      );
+    };
+
+    // ─── Cash Flow Table ───────────────────────────────────────────────
+    const CashFlowTable = ({ cashFlows, currency, displayMode, lease }) => {
+      const [viewMode, setViewMode] = useState("monthly"); // monthly or annual
+      const effectiveMode = viewMode;
+
+      const annualData = useMemo(() => {
+        if (effectiveMode !== "annual") return null;
+        const byYear = {};
+        cashFlows.forEach((cf) => {
+          const y = cf.year;
+          if (!byYear[y]) byYear[y] = { year: y, rent: 0, outgoings: 0, parking: 0, parkingLevy: 0, signage: 0, fm: 0, makeGood: 0, capex: 0, fitout: 0, trFee: 0, total: 0, months: 0 };
+          byYear[y].rent += cf.rent;
+          byYear[y].outgoings += cf.outgoings;
+          byYear[y].parking += cf.parking;
+          byYear[y].parkingLevy += cf.parkingLevy;
+          byYear[y].signage += cf.signage;
+          byYear[y].fm += cf.fm;
+          byYear[y].makeGood += cf.makeGood;
+          byYear[y].capex += cf.capex;
+          byYear[y].fitout += cf.fitout;
+          byYear[y].trFee += cf.trFee;
+          byYear[y].total += cf.total;
+          byYear[y].months++;
+        });
+        return Object.values(byYear);
+      }, [cashFlows, effectiveMode]);
+
+      const rows = effectiveMode === "annual" ? annualData : cashFlows;
+      if (!rows || rows.length === 0) return <p className="text-gray-400 text-sm">No cash flow data. Check lease inputs.</p>;
+
+      return (
+        <div>
+          <div className="flex gap-2 mb-4">
+            <button onClick={() => setViewMode("monthly")} className={`px-3 py-1 text-xs rounded-md ${viewMode === "monthly" ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600"}`}>Monthly</button>
+            <button onClick={() => setViewMode("annual")} className={`px-3 py-1 text-xs rounded-md ${viewMode === "annual" ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600"}`}>Annual</button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-gray-50 text-left">
+                  <th className="px-3 py-2 font-medium text-gray-500">{effectiveMode === "annual" ? "Year" : "Month"}</th>
+                  {effectiveMode === "monthly" && <th className="px-3 py-2 font-medium text-gray-500">Date</th>}
+                  <th className="px-3 py-2 font-medium text-gray-500 text-right">Rent</th>
+                  <th className="px-3 py-2 font-medium text-gray-500 text-right">Outgoings</th>
+                  <th className="px-3 py-2 font-medium text-gray-500 text-right">Parking</th>
+                  <th className="px-3 py-2 font-medium text-gray-500 text-right">Levy</th>
+                  <th className="px-3 py-2 font-medium text-gray-500 text-right">Signage</th>
+                  <th className="px-3 py-2 font-medium text-gray-500 text-right">FM</th>
+                  <th className="px-3 py-2 font-medium text-gray-500 text-right">Make Good</th>
+                  <th className="px-3 py-2 font-medium text-gray-500 text-right">Capex/Fitout</th>
+                  <th className="px-3 py-2 font-medium text-gray-500 text-right">TR Fee</th>
+                  <th className="px-3 py-2 font-medium text-gray-600 text-right font-semibold">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i} className={`border-t border-gray-100 ${r.isRentFree ? "bg-green-50" : r.isAbatement ? "bg-yellow-50" : ""}`}>
+                    <td className="px-3 py-1.5 text-gray-600">{effectiveMode === "annual" ? `Year ${r.year}` : r.month}</td>
+                    {effectiveMode === "monthly" && <td className="px-3 py-1.5 text-gray-500">{r.date}</td>}
+                    <td className="px-3 py-1.5 text-right">{fmt(r.rent, currency, 0)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmt(r.outgoings, currency, 0)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmt(r.parking, currency, 0)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmt(r.parkingLevy, currency, 0)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmt(r.signage, currency, 0)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmt(r.fm, currency, 0)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmt(r.makeGood, currency, 0)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmt(r.capex + r.fitout, currency, 0)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmt(r.trFee, currency, 0)}</td>
+                    <td className="px-3 py-1.5 text-right font-semibold">{fmt(r.total, currency, 0)}</td>
+                  </tr>
+                ))}
+                <tr className="border-t-2 border-gray-300 bg-gray-50 font-semibold">
+                  <td className="px-3 py-2"  colSpan={effectiveMode === "monthly" ? 2 : 1}>TOTAL</td>
+                  <td className="px-3 py-2 text-right">{fmt(rows.reduce((s, r) => s + r.rent, 0), currency, 0)}</td>
+                  <td className="px-3 py-2 text-right">{fmt(rows.reduce((s, r) => s + r.outgoings, 0), currency, 0)}</td>
+                  <td className="px-3 py-2 text-right">{fmt(rows.reduce((s, r) => s + r.parking, 0), currency, 0)}</td>
+                  <td className="px-3 py-2 text-right">{fmt(rows.reduce((s, r) => s + r.parkingLevy, 0), currency, 0)}</td>
+                  <td className="px-3 py-2 text-right">{fmt(rows.reduce((s, r) => s + r.signage, 0), currency, 0)}</td>
+                  <td className="px-3 py-2 text-right">{fmt(rows.reduce((s, r) => s + r.fm, 0), currency, 0)}</td>
+                  <td className="px-3 py-2 text-right">{fmt(rows.reduce((s, r) => s + r.makeGood, 0), currency, 0)}</td>
+                  <td className="px-3 py-2 text-right">{fmt(rows.reduce((s, r) => s + r.capex + r.fitout, 0), currency, 0)}</td>
+                  <td className="px-3 py-2 text-right">{fmt(rows.reduce((s, r) => s + r.trFee, 0), currency, 0)}</td>
+                  <td className="px-3 py-2 text-right">{fmt(rows.reduce((s, r) => s + r.total, 0), currency, 0)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    };
+
+    // ─── NPV Panel ─────────────────────────────────────────────────────
+    const NPVPanel = ({ cashFlows, currency, npvRate, setNpvRate }) => {
+      const npvFields = [
+        { key: "rent", label: "Net Rent" },
+        { key: "outgoings", label: "Outgoings" },
+        { key: "parking", label: "Parking (incl levy)" },
+        { key: "signage", label: "Signage" },
+        { key: "makeGood", label: "Make Good" },
+        { key: "total", label: "Total Occupancy Cost" },
+      ];
+
+      // For parking+levy combined
+      const adjustedCF = cashFlows.map((cf) => ({ ...cf, parking: cf.parking + cf.parkingLevy }));
+
+      return (
+        <Section title="Net Present Value Analysis">
+          <div className="mb-4">
+            <Field label="Discount Rate" value={npvRate} onChange={setNpvRate} suffix="% p.a." step={0.25} />
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            {npvFields.map((f) => (
+              <div key={f.key} className="p-4 bg-gray-50 rounded-lg">
+                <p className="text-xs text-gray-500 mb-1">{f.label}</p>
+                <p className="text-lg font-semibold">{fmt(calcNPV(adjustedCF, Number(npvRate) || 0, f.key), currency, 0)}</p>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 p-4 bg-blue-50 rounded-lg">
+            <p className="text-xs text-gray-500 mb-1">NPV of Incentives (Capex + Fitout)</p>
+            <p className="text-lg font-semibold text-green-700">
+              {fmt(calcNPV(cashFlows.map(cf => ({ ...cf, incentive: cf.capex + cf.fitout })), Number(npvRate) || 0, "incentive"), currency, 0)}
+            </p>
+          </div>
+        </Section>
+      );
+    };
+
+    // ─── Remaining Liability Panel ─────────────────────────────────────
+    const LiabilityPanel = ({ lease, cashFlows, currency }) => {
+      const [fromMonth, setFromMonth] = useState(1);
+      const totalMonths = (lease.termYears || 0) * 12 + (lease.termMonths || 0);
+      const liability = useMemo(() => calcRemainingLiability(lease, cashFlows, Number(fromMonth) || 1), [lease, cashFlows, fromMonth]);
+
+      return (
+        <Section title="Remaining Liability">
+          <div className="mb-4 max-w-xs">
+            <Field label={`From Month (1–${totalMonths})`} value={fromMonth} onChange={setFromMonth} min={1} step={1} />
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500">Remaining Months</p>
+              <p className="text-lg font-semibold">{liability.remainingMonths}</p>
+            </div>
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500">Rent Remaining</p>
+              <p className="text-lg font-semibold">{fmt(liability.rentRemaining, currency, 0)}</p>
+            </div>
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500">Outgoings Remaining</p>
+              <p className="text-lg font-semibold">{fmt(liability.outsRemaining, currency, 0)}</p>
+            </div>
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500">Parking Remaining</p>
+              <p className="text-lg font-semibold">{fmt(liability.parkingRemaining, currency, 0)}</p>
+            </div>
+            <div className="p-3 bg-orange-50 rounded-lg">
+              <p className="text-xs text-gray-500">Incentive Clawback (Pro-rata)</p>
+              <p className="text-lg font-semibold text-orange-700">{fmt(liability.incentiveClawback, currency, 0)}</p>
+            </div>
+            <div className="p-3 bg-orange-50 rounded-lg">
+              <p className="text-xs text-gray-500">Make Good (Escalated to Term End)</p>
+              <p className="text-lg font-semibold text-orange-700">{fmt(liability.makeGoodTotal, currency, 0)}</p>
+            </div>
+          </div>
+          <div className="mt-4 p-4 bg-red-50 rounded-lg">
+            <p className="text-xs text-gray-500 mb-1">Total Remaining Liability</p>
+            <p className="text-2xl font-bold text-red-700">{fmt(liability.grandTotal, currency, 0)}</p>
+            <p className="text-xs text-gray-400 mt-1">Includes occupancy costs, incentive clawback, and make good provision</p>
+          </div>
+        </Section>
+      );
+    };
+
+    // ─── Summary / Desk Cost Panel ─────────────────────────────────────
+    const SummaryPanel = ({ lease, cashFlows, currency, displayMode }) => {
+      const summary = useMemo(() => calcLeaseSummary(lease, cashFlows), [lease, cashFlows]);
+      const divisor = displayMode === "monthly" ? 12 : 1;
+      const periodLabel = displayMode === "monthly" ? "/month" : "/year";
+
+      return (
+        <Section title={`Summary – ${lease.name}`}>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500">Total Occupancy Cost</p>
+              <p className="text-lg font-bold">{fmt(summary.totalCost, currency, 0)}</p>
+            </div>
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500">Avg Annual Cost</p>
+              <p className="text-lg font-bold">{fmt(summary.annualCost, currency, 0)}</p>
+            </div>
+            <div className="p-3 bg-blue-50 rounded-lg">
+              <p className="text-xs text-gray-500">Gross Effective Rent</p>
+              <p className="text-lg font-bold text-blue-700">{fmt(summary.grossEffectiveRent / divisor, currency)} <span className="text-xs font-normal">/sqm {periodLabel}</span></p>
+            </div>
+            <div className="p-3 bg-blue-50 rounded-lg">
+              <p className="text-xs text-gray-500">Net Effective Rent</p>
+              <p className="text-lg font-bold text-blue-700">{fmt(summary.netEffectiveRent / divisor, currency)} <span className="text-xs font-normal">/sqm {periodLabel}</span></p>
+            </div>
+            <div className="p-3 bg-purple-50 rounded-lg">
+              <p className="text-xs text-gray-500">Cost per Desk</p>
+              <p className="text-lg font-bold text-purple-700">{lease.desks > 0 ? fmt(summary.costPerDesk / divisor, currency, 0) : "N/A"} <span className="text-xs font-normal">{lease.desks > 0 ? periodLabel : ""}</span></p>
+            </div>
+            <div className="p-3 bg-purple-50 rounded-lg">
+              <p className="text-xs text-gray-500">Cost per FTE</p>
+              <p className="text-lg font-bold text-purple-700">{lease.fte > 0 ? fmt(summary.costPerFTE / divisor, currency, 0) : "N/A"} <span className="text-xs font-normal">{lease.fte > 0 ? periodLabel : ""}</span></p>
+            </div>
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500">Blended Parking Rate</p>
+              <p className="text-lg font-semibold">{fmt(summary.blendedParkingRate, currency)}<span className="text-xs font-normal"> /space/month</span></p>
+            </div>
+            <div className="p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500">Total Incentives</p>
+              <p className="text-lg font-semibold text-green-700">{fmt(summary.totalIncentives, currency, 0)}</p>
+            </div>
+          </div>
+
+          <div className="mt-5">
+            <h4 className="text-xs font-semibold text-gray-500 mb-3 uppercase">Cost Breakdown (Over Term)</h4>
+            <div className="space-y-2">
+              {[
+                { label: "Net Rent", val: summary.totalRent, color: "bg-blue-500" },
+                { label: "Outgoings", val: summary.totalOuts, color: "bg-cyan-500" },
+                { label: "Parking", val: summary.totalParking, color: "bg-purple-500" },
+                { label: "Signage", val: summary.totalSignage, color: "bg-yellow-500" },
+                { label: "FM Costs", val: summary.totalFM, color: "bg-orange-500" },
+                { label: "Make Good", val: summary.totalMakeGood, color: "bg-red-400" },
+              ].filter(item => item.val > 0).map((item) => {
+                const pctVal = summary.totalCost > 0 ? (item.val / Math.abs(summary.totalCost)) * 100 : 0;
+                return (
+                  <div key={item.label} className="flex items-center gap-3">
+                    <span className="text-xs text-gray-500 w-20">{item.label}</span>
+                    <div className="flex-1 bg-gray-100 rounded-full h-5 overflow-hidden">
+                      <div className={`${item.color} h-full rounded-full flex items-center px-2`} style={{ width: `${Math.max(pctVal, 2)}%` }}>
+                        <span className="text-white text-[10px] font-medium whitespace-nowrap">{pct(pctVal)}</span>
+                      </div>
+                    </div>
+                    <span className="text-xs text-gray-600 w-28 text-right">{fmt(item.val, currency, 0)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </Section>
+      );
+    };
+
+    // ─── Deal Comparison Panel ─────────────────────────────────────────
+    const DealComparisonPanel = ({ deals, currency, displayMode }) => {
+      const [selectedDealIds, setSelectedDealIds] = useState([]);
+      const [groupings, setGroupings] = useState({}); // { groupName: [dealId, ...] }
+
+      const allSummaries = useMemo(() => {
+        return deals.map((deal) => {
+          const leaseSummaries = deal.leases.map((lease) => {
+            const cf = generateCashFlow(lease);
+            const summary = calcLeaseSummary(lease, cf);
+            return { lease, cf, summary };
+          });
+          const totalCost = leaseSummaries.reduce((s, ls) => s + ls.summary.totalCost, 0);
+          const totalArea = deal.leases.reduce((s, l) => s + (l.area || 0), 0);
+          const totalDesks = deal.leases.reduce((s, l) => s + (l.desks || 0), 0);
+          const totalFTE = deal.leases.reduce((s, l) => s + (l.fte || 0), 0);
+          const maxMonths = Math.max(...deal.leases.map(l => (l.termYears || 0) * 12 + (l.termMonths || 0)), 1);
+          const annualCost = totalCost / (maxMonths / 12);
+          return {
+            deal,
+            leaseSummaries,
+            totalCost,
+            totalArea,
+            totalDesks,
+            totalFTE,
+            annualCost,
+            costPerDesk: totalDesks > 0 ? annualCost / totalDesks : 0,
+            costPerFTE: totalFTE > 0 ? annualCost / totalFTE : 0,
+          };
+        });
+      }, [deals]);
+
+      const toggleDeal = (id) => {
+        setSelectedDealIds((prev) => prev.includes(id) ? prev.filter((d) => d !== id) : [...prev, id]);
+      };
+
+      const compared = allSummaries.filter((s) => selectedDealIds.includes(s.deal.id));
+      const divisor = displayMode === "monthly" ? 12 : 1;
+      const periodLabel = displayMode === "monthly" ? "p.m." : "p.a.";
+
+      return (
+        <div className="space-y-5">
+          <Section title="Select Deals to Compare">
+            <div className="flex flex-wrap gap-2">
+              {deals.map((d) => (
+                <button key={d.id} onClick={() => toggleDeal(d.id)}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${selectedDealIds.includes(d.id) ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+                  {d.name} ({d.leases.length} lease{d.leases.length > 1 ? "s" : ""})
+                </button>
+              ))}
+            </div>
+          </Section>
+
+          {compared.length > 0 && (
+            <Section title="Comparison">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 text-left">
+                      <th className="px-4 py-3 font-medium text-gray-500">Metric</th>
+                      {compared.map((c) => (
+                        <th key={c.deal.id} className="px-4 py-3 font-medium text-gray-700">{c.deal.name}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {[
+                      { label: "Total Area (sqm)", fn: (c) => fmtNum(c.totalArea, 0) },
+                      { label: "Total Desks", fn: (c) => fmtNum(c.totalDesks, 0) },
+                      { label: "Total FTE", fn: (c) => fmtNum(c.totalFTE, 0) },
+                      { label: "Total Occupancy Cost", fn: (c) => fmt(c.totalCost, currency, 0), bold: true },
+                      { label: `Annual Cost`, fn: (c) => fmt(c.annualCost / divisor, currency, 0) },
+                      { label: `Cost per Desk ${periodLabel}`, fn: (c) => c.totalDesks > 0 ? fmt(c.costPerDesk / divisor, currency, 0) : "N/A" },
+                      { label: `Cost per FTE ${periodLabel}`, fn: (c) => c.totalFTE > 0 ? fmt(c.costPerFTE / divisor, currency, 0) : "N/A" },
+                    ].map((row) => (
+                      <tr key={row.label}>
+                        <td className={`px-4 py-2 text-gray-600 ${row.bold ? "font-semibold" : ""}`}>{row.label}</td>
+                        {compared.map((c) => (
+                          <td key={c.deal.id} className={`px-4 py-2 ${row.bold ? "font-semibold" : ""}`}>{row.fn(c)}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {/* Visual comparison bar */}
+              <div className="mt-4">
+                <h4 className="text-xs font-semibold text-gray-500 mb-2 uppercase">Total Occupancy Cost Comparison</h4>
+                {(() => {
+                  const maxCost = Math.max(...compared.map(c => c.totalCost), 1);
+                  return compared.map((c) => (
+                    <div key={c.deal.id} className="flex items-center gap-3 mb-2">
+                      <span className="text-xs text-gray-500 w-24 truncate">{c.deal.name}</span>
+                      <div className="flex-1 bg-gray-100 rounded-full h-6 overflow-hidden">
+                        <div className="bg-blue-500 h-full rounded-full flex items-center px-2" style={{ width: `${(c.totalCost / maxCost) * 100}%` }}>
+                          <span className="text-white text-[10px] font-medium whitespace-nowrap">{fmt(c.totalCost, currency, 0)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ));
+                })()}
+              </div>
+            </Section>
+          )}
+        </div>
+      );
+    };
+
+    // ─── Main App ──────────────────────────────────────────────────────
+    function LeaseCalculator() {
+      const [deals, setDeals] = useState([newDeal("Deal 1")]);
+      const [activeDealIdx, setActiveDealIdx] = useState(0);
+      const [activeLeaseIdx, setActiveLeaseIdx] = useState(0);
+      const [activeTab, setActiveTab] = useState("inputs");
+      const [currency, setCurrency] = useState("AUD");
+      const [displayMode, setDisplayMode] = useState("annual");
+      const [npvRate, setNpvRate] = useState(5);
+
+      const activeDeal = deals[activeDealIdx] || deals[0];
+      const activeLease = activeDeal?.leases[activeLeaseIdx] || activeDeal?.leases[0];
+
+      const cashFlows = useMemo(() => activeLease ? generateCashFlow(activeLease) : [], [activeLease]);
+
+      const updateLease = useCallback((updatedLease) => {
+        setDeals((prev) => {
+          const d = [...prev];
+          const deal = { ...d[activeDealIdx], leases: [...d[activeDealIdx].leases] };
+          deal.leases[activeLeaseIdx] = updatedLease;
+          d[activeDealIdx] = deal;
+          return d;
+        });
+      }, [activeDealIdx, activeLeaseIdx]);
+
+      const addLease = () => {
+        setDeals((prev) => {
+          const d = [...prev];
+          const deal = { ...d[activeDealIdx], leases: [...d[activeDealIdx].leases, newLease(`Lease ${d[activeDealIdx].leases.length + 1}`)] };
+          d[activeDealIdx] = deal;
+          return d;
+        });
+        setActiveLeaseIdx(activeDeal.leases.length);
+      };
+
+      const removeLease = (idx) => {
+        if (activeDeal.leases.length <= 1) return;
+        setDeals((prev) => {
+          const d = [...prev];
+          const deal = { ...d[activeDealIdx], leases: d[activeDealIdx].leases.filter((_, i) => i !== idx) };
+          d[activeDealIdx] = deal;
+          return d;
+        });
+        setActiveLeaseIdx(Math.max(0, activeLeaseIdx - 1));
+      };
+
+      const addDeal = () => {
+        setDeals((prev) => [...prev, newDeal(`Deal ${prev.length + 1}`)]);
+        setActiveDealIdx(deals.length);
+        setActiveLeaseIdx(0);
+      };
+
+      const removeDeal = (idx) => {
+        if (deals.length <= 1) return;
+        setDeals((prev) => prev.filter((_, i) => i !== idx));
+        setActiveDealIdx(Math.max(0, activeDealIdx - 1));
+        setActiveLeaseIdx(0);
+      };
+
+      const updateDealName = (idx, name) => {
+        setDeals((prev) => {
+          const d = [...prev];
+          d[idx] = { ...d[idx], name };
+          return d;
+        });
+      };
+
+      return (
+        <div className="min-h-screen bg-gray-50">
+          {/* Header */}
+          <div className="bg-white border-b border-gray-200 px-6 py-4">
+            <div className="flex items-center justify-between flex-wrap gap-4">
+              <div>
+                <h1 className="text-xl font-bold text-gray-800">Commercial Lease Calculator</h1>
+                <p className="text-xs text-gray-400 mt-0.5">Multi-lease analysis with NPV, cash flow, and deal comparison</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <Field label="" value={currency} onChange={setCurrency}
+                  options={Object.entries(CURRENCIES).map(([k, v]) => ({ value: k, label: `${v.symbol} ${k}` }))} />
+                <Field label="" value={displayMode} onChange={setDisplayMode}
+                  options={[{ value: "annual", label: "Annual" }, { value: "monthly", label: "Monthly" }]} />
+              </div>
+            </div>
+          </div>
+
+          <div className="px-6 py-4">
+            {/* Deal Selector */}
+            <div className="flex items-center gap-2 mb-3 flex-wrap">
+              <span className="text-xs font-medium text-gray-500 uppercase">Deals:</span>
+              {deals.map((d, idx) => (
+                <div key={d.id} className="flex items-center gap-1">
+                  <button onClick={() => { setActiveDealIdx(idx); setActiveLeaseIdx(0); }}
+                    className={`px-3 py-1.5 text-xs rounded-lg font-medium ${idx === activeDealIdx ? "bg-blue-600 text-white" : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"}`}>
+                    {d.name}
+                  </button>
+                  {deals.length > 1 && (
+                    <button onClick={() => removeDeal(idx)} className="text-gray-300 hover:text-red-500 text-xs">✕</button>
+                  )}
+                </div>
+              ))}
+              <button onClick={addDeal} className="px-3 py-1.5 text-xs rounded-lg font-medium text-blue-600 border border-blue-200 hover:bg-blue-50">+ Add Deal</button>
+              <div className="ml-4 flex items-center gap-2">
+                <input value={activeDeal.name} onChange={(e) => updateDealName(activeDealIdx, e.target.value)}
+                  className="border border-gray-200 rounded-lg px-2 py-1 text-xs w-32" placeholder="Deal name" />
+              </div>
+            </div>
+
+            {/* Lease Selector within Deal */}
+            <div className="flex items-center gap-2 mb-4 flex-wrap">
+              <span className="text-xs font-medium text-gray-500 uppercase">Leases:</span>
+              {activeDeal.leases.map((l, idx) => (
+                <div key={l.id} className="flex items-center gap-1">
+                  <button onClick={() => setActiveLeaseIdx(idx)}
+                    className={`px-3 py-1.5 text-xs rounded-lg font-medium ${idx === activeLeaseIdx ? "bg-gray-800 text-white" : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"}`}>
+                    {l.name} ({l.area}sqm)
+                  </button>
+                  {activeDeal.leases.length > 1 && (
+                    <button onClick={() => removeLease(idx)} className="text-gray-300 hover:text-red-500 text-xs">✕</button>
+                  )}
+                </div>
+              ))}
+              <button onClick={addLease} className="px-3 py-1.5 text-xs rounded-lg font-medium text-gray-600 border border-gray-200 hover:bg-gray-50">
+                + Add Lease
+              </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex gap-1 mb-5 flex-wrap bg-white rounded-xl p-1 border border-gray-200 w-fit">
+              {[
+                { key: "inputs", label: "Inputs" },
+                { key: "summary", label: "Summary" },
+                { key: "cashflow", label: "Cash Flow" },
+                { key: "npv", label: "NPV" },
+                { key: "liability", label: "Liability" },
+                { key: "compare", label: "Compare Deals" },
+              ].map((t) => (
+                <Tab key={t.key} active={activeTab === t.key} onClick={() => setActiveTab(t.key)}>{t.label}</Tab>
+              ))}
+            </div>
+
+            {/* Tab Content */}
+            {activeTab === "inputs" && activeLease && (
+              <LeaseInputPanel lease={activeLease} onChange={updateLease} currency={currency} />
+            )}
+
+            {activeTab === "summary" && activeLease && (
+              <SummaryPanel lease={activeLease} cashFlows={cashFlows} currency={currency} displayMode={displayMode} />
+            )}
+
+            {activeTab === "cashflow" && activeLease && (
+              <Section title={`Cash Flow – ${activeLease.name}`}>
+                <CashFlowTable cashFlows={cashFlows} currency={currency} displayMode={displayMode} lease={activeLease} />
+              </Section>
+            )}
+
+            {activeTab === "npv" && activeLease && (
+              <NPVPanel cashFlows={cashFlows} currency={currency} npvRate={npvRate} setNpvRate={setNpvRate} />
+            )}
+
+            {activeTab === "liability" && activeLease && (
+              <LiabilityPanel lease={activeLease} cashFlows={cashFlows} currency={currency} />
+            )}
+
+            {activeTab === "compare" && (
+              <DealComparisonPanel deals={deals} currency={currency} displayMode={displayMode} />
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(LeaseCalculator));
+  </script>
+</body>
+</html>
