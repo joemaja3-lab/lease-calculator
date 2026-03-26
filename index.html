@@ -116,7 +116,10 @@
   <script type="text/babel">
     const { useState, useMemo, useCallback } = React;
 
-    // ─── Currency Config ───────────────────────────────────────────────
+    // ─── Constants ─────────────────────────────────────────────────────────
+    const SQM_TO_SQFT = 10.7639;
+
+    // ─── Currency Config ───────────────────────────────────────────────────
     const CURRENCIES = {
       AUD: { symbol: "A$", name: "Australian Dollar" },
       USD: { symbol: "US$", name: "US Dollar" },
@@ -126,7 +129,14 @@
       PGK: { symbol: "K", name: "Papua New Guinea Kina" },
     };
 
-    // ─── Utility Functions ─────────────────────────────────────────────
+    // ─── Area Unit Conversion Helpers ──────────────────────────────────────
+    const toDisplayArea = (sqm, unit) => unit === 'sqft' ? Math.round(sqm * SQM_TO_SQFT) : sqm;
+    const toStoredArea = (val, unit) => unit === 'sqft' ? val / SQM_TO_SQFT : val;
+    const toDisplayCostPerArea = (costPerSqm, unit) => unit === 'sqft' ? costPerSqm / SQM_TO_SQFT : costPerSqm;
+    const toStoredCostPerArea = (val, unit) => unit === 'sqft' ? val * SQM_TO_SQFT : val;
+    const areaLabel = (unit) => unit === 'sqft' ? 'sqft' : 'sqm';
+
+    // ─── Utility Functions ─────────────────────────────────────────────────
     const fmt = (val, currency = "AUD", decimals = 2) => {
       const sym = CURRENCIES[currency]?.symbol || "$";
       const n = Number(val) || 0;
@@ -159,7 +169,7 @@
     let _id = 100;
     const nextId = () => ++_id;
 
-    // ─── Escalation Logic ──────────────────────────────────────────────
+    // ─── Escalation Logic ──────────────────────────────────────────────────
     const escalate = (base, year, type, rate, marketReviews = {}) => {
       if (type === "market") {
         let currentBase = base;
@@ -176,7 +186,7 @@
       return base * Math.pow(1 + (rate || 0) / 100, year);
     };
 
-    // ─── Default Lease Template ────────────────────────────────────────
+    // ─── Default Lease Template ────────────────────────────────────────────
     const newLease = (name = "Lease 1") => ({
       id: nextId(),
       name,
@@ -197,17 +207,22 @@
         { id: nextId(), name: "Undercover Secure", spaces: 15, ratePerMonth: 450, levyPerMonth: 50 },
       ],
       signagePerAnnum: 0,
+      storagePerAnnum: 0,
+      licensedAreaPerAnnum: 0,
       rentFreeMonths: 6,
       abatementMonths: 0,
-      abatementPercent: 50,
-      capexContribution: 0,
-      fitoutContribution: 0,
+      abatementMonthlyAmount: 0,
+      capexTenantWorks: 0,
+      capexLandlordWorks: 0,
+      capexBaseBuilding: 0,
       trFee: 0,
       earlyAccessMonths: 0,
       makeGoodPerSqm: 75,
       fmCostsPerSqm: 0,
       desks: 100,
       fte: 80,
+      incentivePct: 0,
+      incentiveBasis: 'net',
     });
 
     const newDeal = (name = "Option 1") => ({
@@ -216,7 +231,7 @@
       leases: [newLease("Lease 1")],
     });
 
-    // ─── Cash Flow Engine ──────────────────────────────────────────────
+    // ─── Cash Flow Engine ──────────────────────────────────────────────────
     const generateCashFlow = (lease) => {
       const totalMonths = lease.termYears * 12 + lease.termMonths;
       if (totalMonths <= 0) return [];
@@ -229,6 +244,8 @@
         const escalatedRent = escalate(lease.baseRentPerSqm, yr, lease.escalationType, escRate, lease.marketReviews);
         const escalatedOuts = lease.outgoingsPerSqm * Math.pow(1 + (lease.outgoingsEscRate || 0) / 100, yr);
         const escalatedSignage = (lease.signagePerAnnum || 0) * Math.pow(1 + (escRate || 0) / 100, yr);
+        const escalatedStorage = (lease.storagePerAnnum || 0) * Math.pow(1 + (escRate || 0) / 100, yr);
+        const escalatedLicensed = (lease.licensedAreaPerAnnum || 0) * Math.pow(1 + (escRate || 0) / 100, yr);
         const escalatedFM = (lease.fmCostsPerSqm || 0) * Math.pow(1 + (escRate || 0) / 100, yr);
         const escalatedMakeGood = (lease.makeGoodPerSqm || 0) * Math.pow(1 + (escRate || 0) / 100, yr);
 
@@ -241,8 +258,10 @@
           monthlyRent = 0;
           isRentFree = true;
         } else if (m < (lease.rentFreeMonths || 0) + (lease.abatementMonths || 0)) {
-          monthlyRent = monthlyRent * (1 - (lease.abatementPercent || 0) / 100);
+          monthlyRent = Math.max(0, monthlyRent - (lease.abatementMonthlyAmount || 0));
           isAbatement = true;
+        } else {
+          monthlyRent = Math.max(0, monthlyRent - (lease.abatementMonthlyAmount || 0));
         }
 
         // Monthly outgoings
@@ -259,21 +278,23 @@
         // Monthly signage
         const monthlySignage = escalatedSignage / 12;
 
+        // Monthly storage
+        const monthlyStorage = escalatedStorage / 12;
+
+        // Monthly licensed area
+        const monthlyLicensed = escalatedLicensed / 12;
+
         // FM costs
         const monthlyFM = (escalatedFM * lease.area) / 12;
 
         // Make good provision (spread monthly)
         const monthlyMakeGood = (escalatedMakeGood * lease.area) / totalMonths;
 
-        // Early access (shown as occupancy before lease, no rent)
-        const earlyAccessCost = 0; // tracked separately
-
         // Capex / fitout / TR fee — one-time in month 0
-        const capex = m === 0 ? -(lease.capexContribution || 0) : 0;
-        const fitout = m === 0 ? -(lease.fitoutContribution || 0) : 0;
+        const capex = m === 0 ? -(lease.capexTenantWorks + lease.capexLandlordWorks + lease.capexBaseBuilding) : 0;
         const trFee = m === 0 ? (lease.trFee || 0) : 0;
 
-        const totalMonthly = monthlyRent + monthlyOuts + monthlyParking + monthlyParkingLevy + monthlySignage + monthlyFM + monthlyMakeGood + capex + fitout + trFee;
+        const totalMonthly = monthlyRent + monthlyOuts + monthlyParking + monthlyParkingLevy + monthlySignage + monthlyStorage + monthlyLicensed + monthlyFM + monthlyMakeGood + capex + trFee;
 
         rows.push({
           month: m + 1,
@@ -284,11 +305,11 @@
           parking: monthlyParking,
           parkingLevy: monthlyParkingLevy,
           signage: monthlySignage,
+          storage: monthlyStorage,
+          licensed: monthlyLicensed,
           fm: monthlyFM,
           makeGood: monthlyMakeGood,
           capex,
-          fitout,
-          trFee,
           total: totalMonthly,
           isRentFree,
           isAbatement,
@@ -298,7 +319,7 @@
       return rows;
     };
 
-    // ─── NPV Calculation ───────────────────────────────────────────────
+    // ─── NPV Calculation ───────────────────────────────────────────────────
     const calcNPV = (cashFlows, annualRate, field = "total") => {
       const monthlyRate = annualRate / 100 / 12;
       return cashFlows.reduce((sum, cf, i) => {
@@ -306,21 +327,23 @@
       }, 0);
     };
 
-    // ─── Summary Calculations ──────────────────────────────────────────
+    // ─── Summary Calculations ──────────────────────────────────────────────
     const calcLeaseSummary = (lease, cashFlows) => {
       const totalMonths = lease.termYears * 12 + lease.termMonths;
       const totalRent = cashFlows.reduce((s, r) => s + r.rent, 0);
       const totalOuts = cashFlows.reduce((s, r) => s + r.outgoings, 0);
       const totalParking = cashFlows.reduce((s, r) => s + r.parking + r.parkingLevy, 0);
       const totalSignage = cashFlows.reduce((s, r) => s + r.signage, 0);
+      const totalStorage = cashFlows.reduce((s, r) => s + (r.storage || 0), 0);
+      const totalLicensed = cashFlows.reduce((s, r) => s + (r.licensed || 0), 0);
       const totalFM = cashFlows.reduce((s, r) => s + r.fm, 0);
       const totalMakeGood = cashFlows.reduce((s, r) => s + r.makeGood, 0);
-      const totalIncentives = (lease.capexContribution || 0) + (lease.fitoutContribution || 0);
+      const totalCapex = (lease.capexTenantWorks || 0) + (lease.capexLandlordWorks || 0) + (lease.capexBaseBuilding || 0);
       const totalCost = cashFlows.reduce((s, r) => s + r.total, 0);
       const totalTR = lease.trFee || 0;
 
       const annualCost = totalCost / (totalMonths / 12);
-      const grossEffectiveRent = totalMonths > 0 ? (totalRent - totalIncentives) / (lease.area * (totalMonths / 12)) : 0;
+      const grossEffectiveRent = totalMonths > 0 ? (totalRent - totalCapex) / (lease.area * (totalMonths / 12)) : 0;
       const netEffectiveRent = totalMonths > 0 ? totalRent / (lease.area * (totalMonths / 12)) : 0;
       const costPerDesk = lease.desks > 0 ? annualCost / lease.desks : 0;
       const costPerFTE = lease.fte > 0 ? annualCost / lease.fte : 0;
@@ -330,14 +353,25 @@
       const totalMonthlyParking = (lease.parking || []).reduce((s, p) => s + (p.spaces || 0) * ((p.ratePerMonth || 0) + (p.levyPerMonth || 0)), 0);
       const blendedParkingRate = totalSpaces > 0 ? totalMonthlyParking / totalSpaces : 0;
 
+      // Incentive calculations
+      const baseRentAnnual = lease.baseRentPerSqm * lease.area;
+      const outgoingsAnnual = lease.outgoingsPerSqm * lease.area;
+      const incentiveBasisAmount = lease.incentiveBasis === 'gross' ? (baseRentAnnual + outgoingsAnnual) : baseRentAnnual;
+      const incentiveTotalCalc = (lease.incentivePct / 100) * incentiveBasisAmount * lease.termYears;
+
+      const rentFreeValue = (lease.baseRentPerSqm * lease.area / 12) * (lease.rentFreeMonths || 0);
+      const abatementValue = (lease.abatementMonthlyAmount || 0) * (lease.abatementMonths || 0);
+      const incentiveRemaining = incentiveTotalCalc - rentFreeValue - abatementValue - totalCapex;
+
       return {
-        totalMonths, totalRent, totalOuts, totalParking, totalSignage, totalFM, totalMakeGood,
-        totalIncentives, totalCost, totalTR, annualCost, grossEffectiveRent, netEffectiveRent,
+        totalMonths, totalRent, totalOuts, totalParking, totalSignage, totalStorage, totalLicensed, totalFM, totalMakeGood,
+        totalCapex, totalCost, totalTR, annualCost, grossEffectiveRent, netEffectiveRent,
         costPerDesk, costPerFTE, blendedParkingRate, totalSpaces,
+        incentiveTotalCalc, incentiveRemaining, rentFreeValue, abatementValue,
       };
     };
 
-    // ─── Remaining Liability ───────────────────────────────────────────
+    // ─── Remaining Liability ───────────────────────────────────────────────
     const calcRemainingLiability = (lease, cashFlows, fromMonth) => {
       const remaining = cashFlows.filter((cf) => cf.month >= fromMonth);
       const totalMonths = lease.termYears * 12 + lease.termMonths;
@@ -350,9 +384,9 @@
       const totalRemaining = remaining.reduce((s, r) => s + r.total, 0);
 
       // Incentive clawback (pro-rata)
-      const totalIncentives = (lease.capexContribution || 0) + (lease.fitoutContribution || 0);
+      const totalCapex = (lease.capexTenantWorks || 0) + (lease.capexLandlordWorks || 0) + (lease.capexBaseBuilding || 0);
       const clawbackRatio = totalMonths > 0 ? remainingMonths / totalMonths : 0;
-      const incentiveClawback = totalIncentives * clawbackRatio;
+      const incentiveClawback = totalCapex * clawbackRatio;
 
       // Make good at end of term
       const escRate = lease.escalationType === "cpi" ? lease.cpiAssumption : lease.escalationRate;
@@ -366,7 +400,7 @@
       };
     };
 
-    // ─── UI Components ─────────────────────────────────────────────────
+    // ─── UI Components ─────────────────────────────────────────────────────
 
     // Input field component
     const Field = ({ label, value, onChange, type = "number", step, min, className = "", suffix, prefix, wide, options }) => (
@@ -405,20 +439,31 @@
       </button>
     );
 
-    // ─── Lease Input Panel ─────────────────────────────────────────────
-    const LeaseInputPanel = ({ lease, onChange, currency }) => {
+    // ─── Lease Input Panel ─────────────────────────────────────────────────
+    const LeaseInputPanel = ({ lease, onChange, currency, areaUnit }) => {
       const sym = CURRENCIES[currency]?.symbol || "$";
 
       const update = (field, val) => {
         const numFields = ["area", "termYears", "termMonths", "baseRentPerSqm", "escalationRate", "cpiAssumption",
-          "outgoingsPerSqm", "outgoingsEscRate", "signagePerAnnum", "rentFreeMonths", "abatementMonths",
-          "abatementPercent", "capexContribution", "fitoutContribution", "trFee", "earlyAccessMonths",
-          "makeGoodPerSqm", "fmCostsPerSqm", "desks", "fte", "marketReviewInterval"];
+          "outgoingsPerSqm", "outgoingsEscRate", "signagePerAnnum", "storagePerAnnum", "licensedAreaPerAnnum",
+          "rentFreeMonths", "abatementMonths", "abatementMonthlyAmount", "capexTenantWorks", "capexLandlordWorks",
+          "capexBaseBuilding", "trFee", "earlyAccessMonths", "makeGoodPerSqm", "fmCostsPerSqm", "desks", "fte",
+          "marketReviewInterval", "incentivePct"];
         if (numFields.includes(field)) {
           onChange({ ...lease, [field]: val === "" ? "" : Number(val) });
         } else {
           onChange({ ...lease, [field]: val });
         }
+      };
+
+      const updateArea = (val) => {
+        const storedVal = toStoredArea(Number(val) || 0, areaUnit);
+        update("area", storedVal);
+      };
+
+      const updateCostPerArea = (field, val) => {
+        const storedVal = toStoredCostPerArea(Number(val) || 0, areaUnit);
+        update(field, storedVal);
       };
 
       const updateParking = (idx, field, val) => {
@@ -448,12 +493,21 @@
         }
       }
 
+      const capexTotal = (lease.capexTenantWorks || 0) + (lease.capexLandlordWorks || 0) + (lease.capexBaseBuilding || 0);
+      const rentFreeValue = (lease.baseRentPerSqm * lease.area / 12) * (lease.rentFreeMonths || 0);
+      const abatementValue = (lease.abatementMonthlyAmount || 0) * (lease.abatementMonths || 0);
+      const baseRentAnnual = lease.baseRentPerSqm * lease.area;
+      const outgoingsAnnual = lease.outgoingsPerSqm * lease.area;
+      const incentiveBasisAmount = lease.incentiveBasis === 'gross' ? (baseRentAnnual + outgoingsAnnual) : baseRentAnnual;
+      const incentiveTotalCalc = (lease.incentivePct / 100) * incentiveBasisAmount * lease.termYears;
+      const incentiveRemaining = incentiveTotalCalc - rentFreeValue - abatementValue - capexTotal;
+
       return (
         <div className="space-y-5">
           <Section title="Lease Details">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <Field label="Lease Name" value={lease.name} type="text" onChange={(v) => update("name", v)} />
-              <Field label="Net Lettable Area" value={lease.area} onChange={(v) => update("area", v)} suffix="sqm" />
+              <Field label={`Net Lettable Area`} value={toDisplayArea(lease.area, areaUnit)} onChange={updateArea} suffix={areaLabel(areaUnit)} />
               <Field label="Start Date" value={lease.startDate} type="text" onChange={(v) => update("startDate", v)} />
               <Field label="Desks / Workpoints" value={lease.desks} onChange={(v) => update("desks", v)} />
               <Field label="Term – Years" value={lease.termYears} onChange={(v) => update("termYears", v)} min={0} />
@@ -470,7 +524,7 @@
 
           <Section title="Rent & Escalation">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <Field label={`Base Rent`} value={lease.baseRentPerSqm} onChange={(v) => update("baseRentPerSqm", v)} prefix={sym} suffix="/sqm p.a." />
+              <Field label={`Base Rent`} value={toDisplayCostPerArea(lease.baseRentPerSqm, areaUnit)} onChange={(v) => updateCostPerArea("baseRentPerSqm", v)} prefix={sym} suffix={`/sqm p.a.`} />
               <Field label="Escalation Type" value={lease.escalationType} onChange={(v) => update("escalationType", v)}
                 options={[{ value: "fixed", label: "Fixed %" }, { value: "cpi", label: "CPI" }, { value: "market", label: "Market Review" }]} />
               {lease.escalationType === "cpi" ? (
@@ -496,11 +550,13 @@
 
           <Section title="Outgoings & Additional Costs">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <Field label="Outgoings" value={lease.outgoingsPerSqm} onChange={(v) => update("outgoingsPerSqm", v)} prefix={sym} suffix="/sqm p.a." />
+              <Field label="Outgoings" value={toDisplayCostPerArea(lease.outgoingsPerSqm, areaUnit)} onChange={(v) => updateCostPerArea("outgoingsPerSqm", v)} prefix={sym} suffix={`/sqm p.a.`} />
               <Field label="Outgoings Escalation" value={lease.outgoingsEscRate} onChange={(v) => update("outgoingsEscRate", v)} suffix="% p.a." step={0.1} />
-              <Field label="Signage" value={lease.signagePerAnnum} onChange={(v) => update("signagePerAnnum", v)} prefix={sym} suffix="p.a." />
-              <Field label="FM Costs (internal)" value={lease.fmCostsPerSqm} onChange={(v) => update("fmCostsPerSqm", v)} prefix={sym} suffix="/sqm p.a." />
-              <Field label="Make Good Provision" value={lease.makeGoodPerSqm} onChange={(v) => update("makeGoodPerSqm", v)} prefix={sym} suffix="/sqm" />
+              <Field label="Building Signage" value={lease.signagePerAnnum} onChange={(v) => update("signagePerAnnum", v)} prefix={sym} suffix="p.a." />
+              <Field label="Storage" value={lease.storagePerAnnum} onChange={(v) => update("storagePerAnnum", v)} prefix={sym} suffix="p.a." />
+              <Field label="Licensed Area" value={lease.licensedAreaPerAnnum} onChange={(v) => update("licensedAreaPerAnnum", v)} prefix={sym} suffix="p.a." />
+              <Field label="FM Costs (internal)" value={toDisplayCostPerArea(lease.fmCostsPerSqm, areaUnit)} onChange={(v) => updateCostPerArea("fmCostsPerSqm", v)} prefix={sym} suffix={`/sqm p.a.`} />
+              <Field label="Make Good Provision" value={toDisplayCostPerArea(lease.makeGoodPerSqm, areaUnit)} onChange={(v) => updateCostPerArea("makeGoodPerSqm", v)} prefix={sym} suffix={`/${areaLabel(areaUnit)}`} />
             </div>
           </Section>
 
@@ -539,10 +595,58 @@
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <Field label="Rent Free" value={lease.rentFreeMonths} onChange={(v) => update("rentFreeMonths", v)} suffix="months" />
               <Field label="Abatement Period" value={lease.abatementMonths} onChange={(v) => update("abatementMonths", v)} suffix="months" />
-              <Field label="Abatement %" value={lease.abatementPercent} onChange={(v) => update("abatementPercent", v)} suffix="%" />
+              <Field label="Abatement Monthly Amount" value={lease.abatementMonthlyAmount} onChange={(v) => update("abatementMonthlyAmount", v)} prefix={sym} />
               <Field label="Early Access" value={lease.earlyAccessMonths} onChange={(v) => update("earlyAccessMonths", v)} suffix="months" />
-              <Field label="Capex Contribution" value={lease.capexContribution} onChange={(v) => update("capexContribution", v)} prefix={sym} />
-              <Field label="Fitout Contribution" value={lease.fitoutContribution} onChange={(v) => update("fitoutContribution", v)} prefix={sym} />
+            </div>
+          </Section>
+
+          <Section title="Capex / Fitout">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <Field label="Tenant Works" value={lease.capexTenantWorks} onChange={(v) => update("capexTenantWorks", v)} prefix={sym} />
+              <Field label="Landlord Works" value={lease.capexLandlordWorks} onChange={(v) => update("capexLandlordWorks", v)} prefix={sym} />
+              <Field label="Base Building Upgrades" value={lease.capexBaseBuilding} onChange={(v) => update("capexBaseBuilding", v)} prefix={sym} />
+              <div className="input-field flex flex-col justify-end">
+                <span className="text-xs text-gray-500">Total</span>
+                <span className="text-sm font-medium text-gray-700 py-2">{fmt(capexTotal, currency)}</span>
+              </div>
+            </div>
+          </Section>
+
+          <Section title="Total Incentive Package">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+              <Field label="Incentive Basis" value={lease.incentiveBasis} onChange={(v) => update("incentiveBasis", v)}
+                options={[{ value: "net", label: "Net Rent" }, { value: "gross", label: "Gross Rent" }]} />
+              <Field label="Total Incentive %" value={lease.incentivePct} onChange={(v) => update("incentivePct", v)} suffix="%" step={0.1} />
+            </div>
+
+            <div className="space-y-3 p-4 bg-blue-50 rounded-lg border border-blue-100">
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-gray-700 font-medium">Total Incentive (calculated)</span>
+                <span className="font-bold text-blue-900">{fmt(incentiveTotalCalc, currency, 0)}</span>
+              </div>
+              <div className="border-t border-blue-200 pt-3 space-y-2 text-sm">
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-600">Less: Rent Free Value</span>
+                  <span className="text-gray-700 font-medium">{fmt(rentFreeValue, currency, 0)}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-600">Less: Abatement Value</span>
+                  <span className="text-gray-700 font-medium">{fmt(abatementValue, currency, 0)}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-600">Less: Capex/Fitout</span>
+                  <span className="text-gray-700 font-medium">{fmt(capexTotal, currency, 0)}</span>
+                </div>
+              </div>
+              <div className={`border-t border-blue-200 pt-3 flex justify-between items-center text-sm font-semibold ${incentiveRemaining >= 0 ? "text-green-700" : "text-red-700"}`}>
+                <span>Remaining / Unallocated</span>
+                <span>{fmt(incentiveRemaining, currency, 0)}</span>
+              </div>
+            </div>
+          </Section>
+
+          <Section title="Other Costs">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <Field label="TR Fee" value={lease.trFee} onChange={(v) => update("trFee", v)} prefix={sym} />
             </div>
           </Section>
@@ -550,7 +654,7 @@
       );
     };
 
-    // ─── Cash Flow Table ───────────────────────────────────────────────
+    // ─── Cash Flow Table ───────────────────────────────────────────────────
     const CashFlowTable = ({ cashFlows, currency, displayMode, lease }) => {
       const [viewMode, setViewMode] = useState("monthly"); // monthly or annual
       const effectiveMode = viewMode;
@@ -560,17 +664,17 @@
         const byYear = {};
         cashFlows.forEach((cf) => {
           const y = cf.year;
-          if (!byYear[y]) byYear[y] = { year: y, rent: 0, outgoings: 0, parking: 0, parkingLevy: 0, signage: 0, fm: 0, makeGood: 0, capex: 0, fitout: 0, trFee: 0, total: 0, months: 0 };
+          if (!byYear[y]) byYear[y] = { year: y, rent: 0, outgoings: 0, parking: 0, parkingLevy: 0, signage: 0, storage: 0, licensed: 0, fm: 0, makeGood: 0, capex: 0, total: 0, months: 0 };
           byYear[y].rent += cf.rent;
           byYear[y].outgoings += cf.outgoings;
           byYear[y].parking += cf.parking;
           byYear[y].parkingLevy += cf.parkingLevy;
           byYear[y].signage += cf.signage;
+          byYear[y].storage += cf.storage || 0;
+          byYear[y].licensed += cf.licensed || 0;
           byYear[y].fm += cf.fm;
           byYear[y].makeGood += cf.makeGood;
           byYear[y].capex += cf.capex;
-          byYear[y].fitout += cf.fitout;
-          byYear[y].trFee += cf.trFee;
           byYear[y].total += cf.total;
           byYear[y].months++;
         });
@@ -597,10 +701,11 @@
                   <th className="px-4 py-3 font-semibold text-gray-600 text-right">Parking</th>
                   <th className="px-4 py-3 font-semibold text-gray-600 text-right">Levy</th>
                   <th className="px-4 py-3 font-semibold text-gray-600 text-right">Signage</th>
+                  <th className="px-4 py-3 font-semibold text-gray-600 text-right">Storage</th>
+                  <th className="px-4 py-3 font-semibold text-gray-600 text-right">Licensed</th>
                   <th className="px-4 py-3 font-semibold text-gray-600 text-right">FM</th>
                   <th className="px-4 py-3 font-semibold text-gray-600 text-right">Make Good</th>
                   <th className="px-4 py-3 font-semibold text-gray-600 text-right">Capex/Fitout</th>
-                  <th className="px-4 py-3 font-semibold text-gray-600 text-right">TR Fee</th>
                   <th className="px-4 py-3 font-semibold text-gray-700 text-right">Total</th>
                 </tr>
               </thead>
@@ -614,10 +719,11 @@
                     <td className="px-4 py-2 text-right text-gray-700">{fmt(r.parking, currency, 0)}</td>
                     <td className="px-4 py-2 text-right text-gray-700">{fmt(r.parkingLevy, currency, 0)}</td>
                     <td className="px-4 py-2 text-right text-gray-700">{fmt(r.signage, currency, 0)}</td>
+                    <td className="px-4 py-2 text-right text-gray-700">{fmt(r.storage || 0, currency, 0)}</td>
+                    <td className="px-4 py-2 text-right text-gray-700">{fmt(r.licensed || 0, currency, 0)}</td>
                     <td className="px-4 py-2 text-right text-gray-700">{fmt(r.fm, currency, 0)}</td>
                     <td className="px-4 py-2 text-right text-gray-700">{fmt(r.makeGood, currency, 0)}</td>
-                    <td className="px-4 py-2 text-right text-gray-700">{fmt(r.capex + r.fitout, currency, 0)}</td>
-                    <td className="px-4 py-2 text-right text-gray-700">{fmt(r.trFee, currency, 0)}</td>
+                    <td className="px-4 py-2 text-right text-gray-700">{fmt(r.capex, currency, 0)}</td>
                     <td className="px-4 py-2 text-right font-semibold text-gray-900">{fmt(r.total, currency, 0)}</td>
                   </tr>
                 ))}
@@ -628,10 +734,11 @@
                   <td className="px-4 py-3 text-right text-gray-700">{fmt(rows.reduce((s, r) => s + r.parking, 0), currency, 0)}</td>
                   <td className="px-4 py-3 text-right text-gray-700">{fmt(rows.reduce((s, r) => s + r.parkingLevy, 0), currency, 0)}</td>
                   <td className="px-4 py-3 text-right text-gray-700">{fmt(rows.reduce((s, r) => s + r.signage, 0), currency, 0)}</td>
+                  <td className="px-4 py-3 text-right text-gray-700">{fmt(rows.reduce((s, r) => s + (r.storage || 0), 0), currency, 0)}</td>
+                  <td className="px-4 py-3 text-right text-gray-700">{fmt(rows.reduce((s, r) => s + (r.licensed || 0), 0), currency, 0)}</td>
                   <td className="px-4 py-3 text-right text-gray-700">{fmt(rows.reduce((s, r) => s + r.fm, 0), currency, 0)}</td>
                   <td className="px-4 py-3 text-right text-gray-700">{fmt(rows.reduce((s, r) => s + r.makeGood, 0), currency, 0)}</td>
-                  <td className="px-4 py-3 text-right text-gray-700">{fmt(rows.reduce((s, r) => s + r.capex + r.fitout, 0), currency, 0)}</td>
-                  <td className="px-4 py-3 text-right text-gray-700">{fmt(rows.reduce((s, r) => s + r.trFee, 0), currency, 0)}</td>
+                  <td className="px-4 py-3 text-right text-gray-700">{fmt(rows.reduce((s, r) => s + r.capex, 0), currency, 0)}</td>
                   <td className="px-4 py-3 text-right text-gray-900">{fmt(rows.reduce((s, r) => s + r.total, 0), currency, 0)}</td>
                 </tr>
               </tbody>
@@ -669,9 +776,9 @@
             ))}
           </div>
           <div className="kpi-card bg-gradient-to-br from-emerald-50 to-emerald-100 border border-emerald-200">
-            <p className="text-xs text-gray-600 font-medium mb-2">NPV of Incentives (Capex + Fitout)</p>
+            <p className="text-xs text-gray-600 font-medium mb-2">NPV of Capex/Fitout</p>
             <p className="text-2xl font-bold text-emerald-900">
-              {fmt(calcNPV(cashFlows.map(cf => ({ ...cf, incentive: cf.capex + cf.fitout })), Number(npvRate) || 0, "incentive"), currency, 0)}
+              {fmt(calcNPV(cashFlows.map(cf => ({ ...cf, capex: cf.capex })), Number(npvRate) || 0, "capex"), currency, 0)}
             </p>
           </div>
         </Section>
@@ -725,7 +832,7 @@
     };
 
     // ─── Summary / Desk Cost Panel ─────────────────────────────────────
-    const SummaryPanel = ({ lease, cashFlows, currency, displayMode }) => {
+    const SummaryPanel = ({ lease, cashFlows, currency, displayMode, areaUnit }) => {
       const summary = useMemo(() => calcLeaseSummary(lease, cashFlows), [lease, cashFlows]);
       const divisor = displayMode === "monthly" ? 12 : 1;
       const periodLabel = displayMode === "monthly" ? "/month" : "/year";
@@ -745,12 +852,12 @@
               <div className="kpi-card bg-blue-50 border border-blue-200">
                 <p className="text-xs text-gray-600 font-medium mb-1">Gross Effective Rent</p>
                 <p className="text-2xl font-bold text-blue-900">{fmt(summary.grossEffectiveRent / divisor, currency)}</p>
-                <p className="text-xs text-gray-600 mt-1">/sqm {periodLabel}</p>
+                <p className="text-xs text-gray-600 mt-1">/{areaLabel(areaUnit)} {periodLabel}</p>
               </div>
               <div className="kpi-card bg-blue-50 border border-blue-200">
                 <p className="text-xs text-gray-600 font-medium mb-1">Net Effective Rent</p>
                 <p className="text-2xl font-bold text-blue-900">{fmt(summary.netEffectiveRent / divisor, currency)}</p>
-                <p className="text-xs text-gray-600 mt-1">/sqm {periodLabel}</p>
+                <p className="text-xs text-gray-600 mt-1">/{areaLabel(areaUnit)} {periodLabel}</p>
               </div>
               <div className="kpi-card bg-purple-50 border border-purple-200">
                 <p className="text-xs text-gray-600 font-medium mb-1">Cost per Desk</p>
@@ -768,8 +875,16 @@
                 <p className="text-xs text-gray-600 mt-1">/space/month</p>
               </div>
               <div className="kpi-card bg-emerald-50 border border-emerald-200">
-                <p className="text-xs text-gray-600 font-medium mb-1">Total Incentives</p>
-                <p className="text-2xl font-bold text-emerald-900">{fmt(summary.totalIncentives, currency, 0)}</p>
+                <p className="text-xs text-gray-600 font-medium mb-1">Capex / Fitout Total</p>
+                <p className="text-2xl font-bold text-emerald-900">{fmt(summary.totalCapex, currency, 0)}</p>
+              </div>
+              <div className="kpi-card bg-cyan-50 border border-cyan-200">
+                <p className="text-xs text-gray-600 font-medium mb-1">Total Incentive Package</p>
+                <p className="text-2xl font-bold text-cyan-900">{fmt(summary.incentiveTotalCalc, currency, 0)}</p>
+              </div>
+              <div className={`kpi-card border-2 ${summary.incentiveRemaining >= 0 ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
+                <p className="text-xs text-gray-600 font-medium mb-1">Incentive Remaining</p>
+                <p className={`text-2xl font-bold ${summary.incentiveRemaining >= 0 ? "text-green-900" : "text-red-900"}`}>{fmt(summary.incentiveRemaining, currency, 0)}</p>
               </div>
             </div>
 
@@ -781,6 +896,8 @@
                   { label: "Outgoings", val: summary.totalOuts, color: "bg-gradient-to-r from-cyan-400 to-cyan-600" },
                   { label: "Parking", val: summary.totalParking, color: "bg-gradient-to-r from-purple-400 to-purple-600" },
                   { label: "Signage", val: summary.totalSignage, color: "bg-gradient-to-r from-amber-400 to-amber-600" },
+                  { label: "Storage", val: summary.totalStorage, color: "bg-gradient-to-r from-teal-400 to-teal-600" },
+                  { label: "Licensed Area", val: summary.totalLicensed, color: "bg-gradient-to-r from-indigo-400 to-indigo-600" },
                   { label: "FM Costs", val: summary.totalFM, color: "bg-gradient-to-r from-orange-400 to-orange-600" },
                   { label: "Make Good", val: summary.totalMakeGood, color: "bg-gradient-to-r from-red-400 to-red-600" },
                 ].filter(item => item.val > 0).map((item) => {
@@ -1011,6 +1128,7 @@
       const [currency, setCurrency] = useState("AUD");
       const [displayMode, setDisplayMode] = useState("annual");
       const [npvRate, setNpvRate] = useState(5);
+      const [areaUnit, setAreaUnit] = useState("sqm");
 
       const activeDeal = deals[activeDealIdx] || deals[0];
       const activeLease = activeDeal?.leases[activeLeaseIdx] || activeDeal?.leases[0];
@@ -1079,6 +1197,8 @@
                 <p className="text-blue-100 text-sm mt-1">Professional lease analysis & comparison tool</p>
               </div>
               <div className="flex items-center gap-4">
+                <Field label="Area Unit" value={areaUnit} onChange={setAreaUnit}
+                  options={[{ value: "sqm", label: "sqm" }, { value: "sqft", label: "sqft" }]} />
                 <Field label="Currency" value={currency} onChange={setCurrency}
                   options={Object.entries(CURRENCIES).map(([k, v]) => ({ value: k, label: `${v.symbol} ${k}` }))} />
                 <Field label="Display" value={displayMode} onChange={setDisplayMode}
@@ -1121,7 +1241,7 @@
                   <div key={l.id} className="flex items-center gap-1">
                     <button onClick={() => setActiveLeaseIdx(idx)}
                       className={`px-4 py-2 text-sm rounded-lg font-medium transition-all ${idx === activeLeaseIdx ? "bg-gray-800 text-white shadow-md" : "bg-gray-100 text-gray-700 hover:bg-gray-200"}`}>
-                      {l.name} ({l.area}sqm)
+                      {l.name} ({toDisplayArea(l.area, areaUnit)}{areaLabel(areaUnit)})
                     </button>
                     {activeDeal.leases.length > 1 && (
                       <button onClick={() => removeLease(idx)} className="text-gray-400 hover:text-red-500 text-lg leading-none">×</button>
@@ -1150,11 +1270,11 @@
 
             {/* Tab Content */}
             {activeTab === "inputs" && activeLease && (
-              <LeaseInputPanel lease={activeLease} onChange={updateLease} currency={currency} />
+              <LeaseInputPanel lease={activeLease} onChange={updateLease} currency={currency} areaUnit={areaUnit} />
             )}
 
             {activeTab === "summary" && activeLease && (
-              <SummaryPanel lease={activeLease} cashFlows={cashFlows} currency={currency} displayMode={displayMode} />
+              <SummaryPanel lease={activeLease} cashFlows={cashFlows} currency={currency} displayMode={displayMode} areaUnit={areaUnit} />
             )}
 
             {activeTab === "cashflow" && activeLease && (
