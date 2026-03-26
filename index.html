@@ -210,7 +210,7 @@
       fte: 80,
     });
 
-    const newDeal = (name = "Deal 1") => ({
+    const newDeal = (name = "Option 1") => ({
       id: nextId(),
       name,
       leases: [newLease("Lease 1")],
@@ -804,10 +804,11 @@
       );
     };
 
-    // ─── Deal Comparison Panel ─────────────────────────────────────────
+    // ─── Option Comparison Panel ─────────────────────────────────────────
     const DealComparisonPanel = ({ deals, currency, displayMode }) => {
       const [selectedDealIds, setSelectedDealIds] = useState([]);
-      const [groupings, setGroupings] = useState({}); // { groupName: [dealId, ...] }
+      const [groups, setGroups] = useState([]); // [{ name: "Group 1", optionIds: [1, 2] }]
+      const [newGroupName, setNewGroupName] = useState("");
 
       const allSummaries = useMemo(() => {
         return deals.map((deal) => {
@@ -840,13 +841,69 @@
         setSelectedDealIds((prev) => prev.includes(id) ? prev.filter((d) => d !== id) : [...prev, id]);
       };
 
-      const compared = allSummaries.filter((s) => selectedDealIds.includes(s.deal.id));
+      // Group management
+      const addGroup = () => {
+        if (!newGroupName.trim()) return;
+        setGroups((prev) => [...prev, { id: nextId(), name: newGroupName.trim(), optionIds: [] }]);
+        setNewGroupName("");
+      };
+
+      const removeGroup = (gid) => {
+        setGroups((prev) => prev.filter((g) => g.id !== gid));
+      };
+
+      const toggleOptionInGroup = (gid, optionId) => {
+        setGroups((prev) => prev.map((g) => {
+          if (g.id !== gid) return g;
+          const ids = g.optionIds.includes(optionId)
+            ? g.optionIds.filter((id) => id !== optionId)
+            : [...g.optionIds, optionId];
+          return { ...g, optionIds: ids };
+        }));
+      };
+
+      // Build comparison items: individual selected options + groups
+      const comparisonItems = useMemo(() => {
+        const items = [];
+
+        // Individual options (not in any group)
+        const groupedIds = new Set(groups.flatMap((g) => g.optionIds));
+        allSummaries.filter((s) => selectedDealIds.includes(s.deal.id) && !groupedIds.has(s.deal.id)).forEach((s) => {
+          items.push({ name: s.deal.name, ...s, isGroup: false });
+        });
+
+        // Groups
+        groups.forEach((g) => {
+          const members = allSummaries.filter((s) => g.optionIds.includes(s.deal.id));
+          if (members.length === 0) return;
+          const totalCost = members.reduce((s, m) => s + m.totalCost, 0);
+          const totalArea = members.reduce((s, m) => s + m.totalArea, 0);
+          const totalDesks = members.reduce((s, m) => s + m.totalDesks, 0);
+          const totalFTE = members.reduce((s, m) => s + m.totalFTE, 0);
+          const maxAnnualCost = members.reduce((s, m) => s + m.annualCost, 0);
+          items.push({
+            name: g.name + " (" + members.map(m => m.deal.name).join(" + ") + ")",
+            totalCost,
+            totalArea,
+            totalDesks,
+            totalFTE,
+            annualCost: maxAnnualCost,
+            costPerDesk: totalDesks > 0 ? maxAnnualCost / totalDesks : 0,
+            costPerFTE: totalFTE > 0 ? maxAnnualCost / totalFTE : 0,
+            isGroup: true,
+            deal: { id: g.id, name: g.name },
+          });
+        });
+
+        return items;
+      }, [allSummaries, selectedDealIds, groups]);
+
       const divisor = displayMode === "monthly" ? 12 : 1;
       const periodLabel = displayMode === "monthly" ? "p.m." : "p.a.";
 
       return (
         <div className="space-y-5">
-          <Section title="Select Deals to Compare">
+          <Section title="Select Options to Compare">
             <div className="flex flex-wrap gap-2">
               {deals.map((d) => (
                 <button key={d.id} onClick={() => toggleDeal(d.id)}
@@ -857,7 +914,33 @@
             </div>
           </Section>
 
-          {compared.length > 0 && (
+          {/* Grouping */}
+          <Section title="Group Options (e.g. Warehouse + Office as one)">
+            <p className="text-xs text-gray-500 mb-3">Create a group to combine multiple options into one comparison item.</p>
+            <div className="flex items-center gap-2 mb-4">
+              <input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)}
+                className="input-control flex-1" placeholder="Group name, e.g. 'WH + Office'" onKeyDown={(e) => e.key === "Enter" && addGroup()} />
+              <button onClick={addGroup} className="px-4 py-2.5 text-sm rounded-lg font-medium bg-blue-600 text-white hover:bg-blue-700">Create Group</button>
+            </div>
+            {groups.map((g) => (
+              <div key={g.id} className="p-3 bg-gray-50 rounded-lg mb-2">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-semibold text-gray-700">{g.name}</span>
+                  <button onClick={() => removeGroup(g.id)} className="text-gray-400 hover:text-red-500 text-sm">Remove</button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {deals.map((d) => (
+                    <button key={d.id} onClick={() => toggleOptionInGroup(g.id, d.id)}
+                      className={`px-3 py-1.5 text-xs rounded-md font-medium transition-all ${g.optionIds.includes(d.id) ? "bg-green-600 text-white" : "bg-white border border-gray-300 text-gray-600 hover:bg-gray-100"}`}>
+                      {d.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </Section>
+
+          {comparisonItems.length > 0 && (
             <div className="space-y-5">
               <Section title="Comparison Table">
                 <div className="overflow-x-auto">
@@ -865,8 +948,10 @@
                     <thead>
                       <tr className="bg-gray-100">
                         <th className="px-4 py-3 font-semibold text-gray-700 text-left">Metric</th>
-                        {compared.map((c) => (
-                          <th key={c.deal.id} className="px-4 py-3 font-semibold text-gray-700 text-left">{c.deal.name}</th>
+                        {comparisonItems.map((c, i) => (
+                          <th key={i} className="px-4 py-3 font-semibold text-gray-700 text-left">
+                            {c.name} {c.isGroup && <span className="text-xs font-normal text-blue-600">(grouped)</span>}
+                          </th>
                         ))}
                       </tr>
                     </thead>
@@ -882,8 +967,8 @@
                       ].map((row) => (
                         <tr key={row.label} className="hover:bg-gray-50">
                           <td className={`px-4 py-3 text-gray-700 ${row.bold ? "font-semibold" : ""}`}>{row.label}</td>
-                          {compared.map((c) => (
-                            <td key={c.deal.id} className={`px-4 py-3 text-gray-700 ${row.bold ? "font-semibold" : ""}`}>{row.fn(c)}</td>
+                          {comparisonItems.map((c, i) => (
+                            <td key={i} className={`px-4 py-3 text-gray-700 ${row.bold ? "font-semibold" : ""}`}>{row.fn(c)}</td>
                           ))}
                         </tr>
                       ))}
@@ -895,15 +980,15 @@
               {/* Visual comparison bar */}
               <Section title="Cost Comparison">
                 {(() => {
-                  const maxCost = Math.max(...compared.map(c => c.totalCost), 1);
-                  return compared.map((c) => (
-                    <div key={c.deal.id} className="mb-4 last:mb-0">
+                  const maxCost = Math.max(...comparisonItems.map(c => c.totalCost), 1);
+                  return comparisonItems.map((c, i) => (
+                    <div key={i} className="mb-4 last:mb-0">
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm font-medium text-gray-700 truncate">{c.deal.name}</span>
+                        <span className="text-sm font-medium text-gray-700 truncate">{c.name}</span>
                         <span className="text-sm font-semibold text-gray-900">{fmt(c.totalCost, currency, 0)}</span>
                       </div>
                       <div className="w-full bg-gray-200 rounded-full h-8 overflow-hidden">
-                        <div className="bg-gradient-to-r from-blue-500 to-blue-600 h-full rounded-full flex items-center px-3 transition-all duration-300" style={{ width: `${(c.totalCost / maxCost) * 100}%` }}>
+                        <div className={`h-full rounded-full flex items-center px-3 transition-all duration-300 ${c.isGroup ? "bg-gradient-to-r from-green-500 to-green-600" : "bg-gradient-to-r from-blue-500 to-blue-600"}`} style={{ width: `${(c.totalCost / maxCost) * 100}%` }}>
                           <span className="text-white text-xs font-bold whitespace-nowrap">{pct((c.totalCost / maxCost) * 100)}</span>
                         </div>
                       </div>
@@ -919,7 +1004,7 @@
 
     // ─── Main App ──────────────────────────────────────────────────────
     function LeaseCalculator() {
-      const [deals, setDeals] = useState([newDeal("Deal 1")]);
+      const [deals, setDeals] = useState([newDeal("Option 1")]);
       const [activeDealIdx, setActiveDealIdx] = useState(0);
       const [activeLeaseIdx, setActiveLeaseIdx] = useState(0);
       const [activeTab, setActiveTab] = useState("inputs");
@@ -964,7 +1049,7 @@
       };
 
       const addDeal = () => {
-        setDeals((prev) => [...prev, newDeal(`Deal ${prev.length + 1}`)]);
+        setDeals((prev) => [...prev, newDeal(`Option ${prev.length + 1}`)]);
         setActiveDealIdx(deals.length);
         setActiveLeaseIdx(0);
       };
@@ -994,19 +1079,19 @@
                 <p className="text-blue-100 text-sm mt-1">Professional lease analysis & comparison tool</p>
               </div>
               <div className="flex items-center gap-4">
-                <Field label="" value={currency} onChange={setCurrency}
+                <Field label="Currency" value={currency} onChange={setCurrency}
                   options={Object.entries(CURRENCIES).map(([k, v]) => ({ value: k, label: `${v.symbol} ${k}` }))} />
-                <Field label="" value={displayMode} onChange={setDisplayMode}
+                <Field label="Display" value={displayMode} onChange={setDisplayMode}
                   options={[{ value: "annual", label: "Annual" }, { value: "monthly", label: "Monthly" }]} />
               </div>
             </div>
           </div>
 
           <div className="px-6 py-6">
-            {/* Deal Selector */}
+            {/* Option Selector */}
             <div className="bg-white rounded-lg p-4 card-shadow mb-6">
               <div className="mb-4">
-                <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Deals</span>
+                <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Options</span>
                 <div className="flex items-center gap-2 mt-3 flex-wrap">
                   {deals.map((d, idx) => (
                     <div key={d.id} className="flex items-center gap-1">
@@ -1019,18 +1104,18 @@
                       )}
                     </div>
                   ))}
-                  <button onClick={addDeal} className="px-4 py-2 text-sm rounded-lg font-medium text-blue-600 border border-blue-300 hover:bg-blue-50">+ Add Deal</button>
+                  <button onClick={addDeal} className="px-4 py-2 text-sm rounded-lg font-medium text-blue-600 border border-blue-300 hover:bg-blue-50">+ Add Option</button>
                 </div>
               </div>
               <div>
                 <input value={activeDeal.name} onChange={(e) => updateDealName(activeDealIdx, e.target.value)}
-                  className="input-control w-40" placeholder="Deal name" />
+                  className="input-control w-40" placeholder="Option name" />
               </div>
             </div>
 
-            {/* Lease Selector within Deal */}
+            {/* Lease Selector within Option */}
             <div className="bg-white rounded-lg p-4 card-shadow mb-6">
-              <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Leases in Deal</span>
+              <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Leases in Option</span>
               <div className="flex items-center gap-2 mt-3 flex-wrap">
                 {activeDeal.leases.map((l, idx) => (
                   <div key={l.id} className="flex items-center gap-1">
@@ -1057,7 +1142,7 @@
                 { key: "cashflow", label: "Cash Flow" },
                 { key: "npv", label: "NPV" },
                 { key: "liability", label: "Liability" },
-                { key: "compare", label: "Compare Deals" },
+                { key: "compare", label: "Compare Options" },
               ].map((t) => (
                 <Tab key={t.key} active={activeTab === t.key} onClick={() => setActiveTab(t.key)}>{t.label}</Tab>
               ))}
